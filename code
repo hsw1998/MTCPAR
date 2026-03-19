@@ -1,0 +1,574 @@
+Fixed = function (y, X, group, adj, Lambda = "default", lambda.type = NULL, 
+                  adaptive = TRUE, weight = NULL, alpha = NULL, standardize = TRUE, 
+                  MPinv = FALSE, tol = 1e-05, maxit = 500, progress = FALSE, 
+                  out.all = FALSE, cwu.control = NULL, intercept = TRUE) 
+{
+  t1 <- proc.time()[3]
+  norm2 <- function(x) {
+    sqrt(sum(x^2))
+  }
+  if (standardize) {
+    normy <- norm2(y)
+    y <- y/normy
+    y_ <- split(y, group)
+    normX <- c(1, colSums(X^2) %>% sqrt)
+    X <- scale(cbind(1, X), center = F, scale = normX) %>% 
+      `attr<-`("scaled:scale", NULL)
+    X_ <- as.data.frame(X) %>% split(group) %>% lapply(data.matrix)
+  }
+  else {
+    y_ <- split(y, group)
+    if (intercept == TRUE) {
+      X_ <- cbind(1, X) %>% as.data.frame %>% split(group) %>% 
+        lapply(data.matrix)
+    }
+    else {
+      X_ <- X %>% as.data.frame %>% split(group) %>% lapply(data.matrix)
+    }
+  }
+  .y <- unlist(y_)
+  D <- split(adj[, 2], adj[, 1])
+  r <- sapply(D, length)
+  n <- length(y)
+  k <- ncol(X_[[1]])
+  m <- length(y_)
+  id_ <- split(1:n, group)
+  if (MPinv) {
+    SOLVE <- svd_solve
+  }
+  else {
+    SOLVE <- chol_solve
+  }
+  GWcomp <- lapply(1:m, function(j) {
+    Xj <- X_[[j]]
+    yj <- y_[[j]]
+    X.X <- crossprod(Xj)
+    X.y <- crossprod(Xj, yj) %>% drop
+    return(list(X.X = X.X, X.y = X.y, LSE = SOLVE(X.X, X.y)))
+  }) %>% purrr::transpose()
+  X.X_ <- GWcomp$X.X
+  X.y_ <- GWcomp$X.y
+  BETA.LSE <- GWcomp$LSE %>% do.call(rbind, .)
+  rm(GWcomp)
+  invisible(gc())
+  Beta.max <- SOLVE(Reduce(`+`, X.X_), Reduce(`+`, X.y_))
+  BETA.max <- matrix(Beta.max, m, k, byrow = T)
+  if (is.null(weight)) {
+    if (adaptive) {
+      W <- lapply(1:m, function(j) {
+        Betaj <- BETA.LSE[j, ]
+        out <- sapply(D[[j]], function(l) {
+          1/norm2(Betaj - BETA.LSE[l, ])
+        })
+        return(out)
+      })
+    }
+    else {
+      W <- lapply(r, function(x) {
+        rep(1, x)
+      })
+    }
+  }
+  else {
+    W <- weight
+    rm(weight)
+    invisible(gc())
+  }
+  if (is.character(Lambda)) {
+    lam.max <- sapply(1:m, function(j) {
+      norm2(X.X_[[j]] %*% Beta.max - X.y_[[j]])/sum(W[[j]])
+    }) %>% max
+    if (Lambda == "default") {
+      lamR <- sqrt(.Machine$double.eps)/lam.max
+      Lambda <- lam.max * exp(seq(0, log(lamR), by = log(lamR)/99)) %>% 
+        rev
+    }
+    else if (Lambda == "uniform") {
+      Lambda <- seq(0, lam.max, length = 101)[-1]
+    }
+  }
+  else if (is.null(lambda.type)) {
+    stop("Please select lambda.type")
+  }
+  else if (lambda.type == "rate") {
+    lam.max <- sapply(1:m, function(j) {
+      norm2(X.X_[[j]] %*% Beta.max - X.y_[[j]])/sum(W[[j]])
+    }) %>% max
+    Lambda <- lam.max * Lambda
+  }
+  else if (lambda.type != "value") {
+    stop("The lambda.type is missing")
+  }
+  lam.n <- length(Lambda)
+  s.t <- mean((y - mean(y))^2)
+  if (is.null(alpha)) {
+    alpha <- log(n)
+  }
+  gr.labs <- 1:m
+  if (is.null(cwu.control)) {
+    cwu.control <- list(conv.check = "coef", tol = 1e-05)
+  }
+  else {
+    cwu.control <- list(conv.check = ifelse(is.null(cwu.control$conv.check), 
+                                            "coef", cwu.control$conv.check), tol = ifelse(is.null(cwu.control$tol), 
+                                                                                          1e-05, cwu.control$tol))
+    if (!(cwu.control$conv.check %in% c("coef", "grad"))) {
+      cwu.control$conv.check <- "coef"
+      cwu.control$warning <- "`conv.check` is replaced by `coef`"
+      warning("`conv.check` is replaced by `coef` because it is wrong")
+    }
+  }
+  tol1 <- cwu.control$tol
+  if (cwu.control$conv.check == "coef") {
+    convC <- function(Beta, M, c, Lambda, B, r, Beta0) {
+      max((Beta - Beta0)^2/Beta0^2, na.rm = TRUE)
+    }
+  }
+  else {
+    convC <- function(Beta, M, c, Lambda, B, r, Beta0) {
+      Grad <- 2 * (drop(M %*% Beta) - c) + (lapply(1:r, 
+                                                   function(.x) {
+                                                     a <- Beta - B[.x, ]
+                                                     return(Lambda[.x] * a/norm2(a))
+                                                   }) %>% Reduce("+", .))
+      return(abs(Grad) %>% max)
+    }
+  }
+  fobj <- function(rss, D, BETA, lambda, W) {
+    pen <- sapply(1:m, function(j) {
+      wj <- W[[j]]
+      Dj <- D[[j]]
+      Bj <- BETA[Dj, , drop = F]
+      Betaj <- BETA[j, ]
+      out <- scale(Bj, center = Betaj, scale = F) %>% apply(1, 
+                                                            norm2) %>% multiply_by(wj) %>% sum
+      return(out)
+    }) %>% sum
+    return(rss + lambda * pen)
+  }
+  BETA.aft <- BETA.LSE
+  BETAs <- Gr.labs <- list()
+  LOG <- matrix(0, lam.n, 8)
+  for (lam.i in 1:lam.n) {
+    lambda <- Lambda[lam.i]
+    dif <- 1
+    iter <- 0
+    while ((dif > tol) & (iter < maxit)) {
+      iter <- iter + 1
+      BETA.bef <- BETA.aft
+      for (j in 1:m) {
+        Dj <- D[[j]]
+        labj <- gr.labs[Dj]
+        Bj <- BETA.aft[Dj, , drop = F]
+        wj <- W[[j]]
+        rj <- r[j]
+        if (length(unique(labj)) < rj) {
+          idxj <- split(1:rj, labj)
+          Bj0 <- Bj
+          Bj <- lapply(idxj, function(x) {
+            Bj0[x[1], ]
+          }) %>% do.call(rbind, .)
+          wj <- split(wj, labj) %>% sapply(., sum)
+          labj <- sapply(idxj, function(x) {
+            labj[x[1]]
+          })
+        }
+        resj <- GGFL1(X.X_[[j]], X.y_[[j]], 2 * lambda * 
+                        wj, Bj, BETA.aft[j, ], tol1, convC, maxit)
+        BETA.aft[j, ] <- resj$solution
+        if (resj$type == "join") {
+          gr.labs[j] <- labj[resj$idx]
+        }
+        if (resj$type == "disjoin") {
+          gr.labs[j] <- setdiff(1:m, gr.labs) %>% min
+        }
+      }
+      t <- unique(gr.labs) %>% length
+      if (t == 1) {
+        BETA.aft <- BETA.max
+      }
+      else if (t < m) {
+        E <- split(1:m, gr.labs)
+        idx.f <- (sapply(E, length) > 1) %>% which
+        XI <- lapply(E, function(Ej) {
+          BETA.aft[Ej[1], ]
+        }) %>% do.call(rbind, .)
+        grf.labs <- sapply(E, function(Ej) {
+          gr.labs[Ej[1]]
+        })
+        for (l in idx.f) {
+          El <- E[[l]]
+          Fl <- lapply(El, function(j) {
+            Dj <- D[[j]]
+            return(setdiff(Dj, El))
+          }) %>% unlist %>% unique
+          D1 <- lapply((1:t)[-l], function(s) {
+            if (length(intersect(E[[s]], Fl)) > 0) {
+              return(s)
+            }
+          }) %>% unlist
+          Jl <- lapply(D1, function(i) {
+            Ei <- E[[i]]
+            Out <- lapply(El, function(j) {
+              Dj <- D[[j]]
+              if (length(intersect(Ei, Dj)) > 0) {
+                return(cbind(j, intersect(Ei, Dj)))
+              }
+            }) %>% do.call(rbind, .)
+          })
+          w1 <- lapply(Jl, function(x) {
+            lapply(1:nrow(x), function(i) {
+              W[[x[i, 1]]][which(x[i, 2] == D[[x[i, 1]]])]
+            }) %>% unlist %>% sum
+          }) %>% unlist
+          Bl <- XI[D1, , drop = F]
+          rl <- length(D1)
+          labl <- grf.labs[D1]
+          if (length(unique(labl)) < rl) {
+            idxl <- split(1:rl, labl)
+            Bl0 <- Bl
+            Bl <- lapply(idxl, function(x) {
+              Bl0[x[1], ]
+            }) %>% do.call(rbind, .)
+            w1 <- split(w1, labl) %>% sapply(., sum)
+            labl <- sapply(idxl, function(x) {
+              labl[x[1]]
+            })
+          }
+          resl <- GGFL1(X.X_[El] %>% Reduce("+", .), 
+                        X.y_[El] %>% Reduce("+", .), 2 * lambda * 
+                          w1, Bl, XI[l, ], tol1, convC, maxit)
+          XI[l, ] <- resl$solution
+          BETA.aft[El, ] <- matrix(XI[l, ], length(El), 
+                                   k, byrow = T)
+          if (resl$type == "join") {
+            gr.labs[El] <- grf.labs[l] <- labl[resl$idx]
+          }
+          if (resl$type == "disjoin") {
+            gr.labs[El] <- grf.labs[l] <- setdiff(1:m, 
+                                                  grf.labs) %>% min
+          }
+        }
+      }
+      dif <- max((BETA.aft - BETA.bef)^2/BETA.bef^2, na.rm = TRUE)
+      if (progress) {
+        y.hat_ <- lapply(1:m, function(j) {
+          X_[[j]] %*% BETA.aft[j, ] %>% drop
+        })
+        .rss <- sapply(1:m, function(j) {
+          sum((y_[[j]] - y.hat_[[j]])^2)
+        }) %>% sum
+        obj <- fobj(.rss, D, BETA.aft, lambda, W)
+        print(paste(lam.i, iter, dif, obj, sep = "_"))
+      }
+    }
+    BETAs[[lam.i]] <- BETA.aft
+    Gr.labs[[lam.i]] <- match(gr.labs, unique(gr.labs))
+    if (progress) {
+      rss <- .rss/n
+    }
+    else {
+      y.hat_ <- lapply(1:m, function(j) {
+        X_[[j]] %*% BETA.aft[j, ] %>% drop
+      })
+      rss <- (sapply(1:m, function(j) {
+        sum((y_[[j]] - y.hat_[[j]])^2)
+      }) %>% sum)/n
+      obj <- fobj(n * rss, D, BETA.aft, lambda, W)
+    }
+    df <- length(unique(gr.labs)) * k
+    LOG[lam.i, ] <- c(lambda, rss, df, rss/((1 - (df/n))^alpha), 
+                      1 - (rss/s.t), median(abs(.y - unlist(y.hat_))/abs(.y)), 
+                      obj, iter)
+  }
+  t2 <- proc.time()[3]
+  LOG <- as.data.frame(LOG) %>% set_names(c("lambda", "rss", 
+                                            "df", "MSC", "R2", "MER", "obje", "iter"))
+  opt <- which.min(LOG$MSC)
+  BETA.hat <- BETAs[[opt]]
+  FIT <- lapply(1:m, function(j) {
+    X_[[j]] %*% cbind(BETA.hat[j, ], BETA.LSE[j, ], Beta.max)
+  }) %>% do.call(rbind, .) %>% set_colnames(c("GGFL", "OLS", 
+                                              "max")) %>% as.data.frame %>% dplyr::mutate(id = unlist(id_)) %>% 
+    dplyr::arrange(id) %>% dplyr::select(-id)
+  if (standardize) {
+    BETA.hat <- scale(normy * BETA.hat, center = F, scale = normX) %>% 
+      `attr<-`("scaled:scale", NULL)
+    BETA.LSE <- scale(normy * BETA.LSE, center = F, scale = normX) %>% 
+      `attr<-`("scaled:scale", NULL)
+    BETA.max <- matrix(normy * Beta.max/normX, m, k, byrow = T)
+    FIT <- normy * FIT
+  }
+  cluster <- Gr.labs[[opt]]
+  m. <- max(cluster)
+  rownames(BETA.hat) <- paste0("c", cluster)
+  out <- list(coefficients = list(GGFL = BETA.hat, OLS = BETA.LSE, 
+                                  MAX = BETA.max), fitted.values = FIT, summary = LOG[opt, 
+                                  ] %>% dplyr::mutate(cluster = m., alpha = alpha, time = (t2 - 
+                                                                                             t1) %>% set_names(NULL)), weight = W, cluster = split(1:m, 
+                                                                                                                                                   cluster) %>% set_names(paste0("c", 1:m.)), cluster.labels = cluster %>% 
+                set_names(paste0("g", 1:m)), cwu.control = cwu.control)
+  if (out.all) {
+    if (standardize) {
+      BETAs <- lapply(BETAs, function(BETA) {
+        scale(normy * BETA, center = F, scale = normX) %>% 
+          `attr<-`("scaled:scale", NULL)
+      })
+    }
+    out$all.coef = BETAs
+    out$all.cluster = do.call(rbind, Gr.labs) %>% set_colnames(paste0("g", 
+                                                                      1:m)) %>% set_rownames(paste0("lam", 1:lam.n))
+    out$log = LOG
+  }
+  return(out)
+}
+environment(Fixed) = asNamespace("GGFL")
+assignInNamespace("GGFL", Fixed, ns = "GGFL")
+
+##Smoothing method(Initial estimator)
+Smooth= function(X,Y,Z,K_max,L.alpha,L.beta,L.theta,U.alpha,U.beta,U.theta,n.optim=20){
+  #the first (threshold_num+1)*p elements of L and U are the lower and upper bound of alpha respectively
+  #the last threshold_num elements of L and U are the lower and upper bound of theta respectively
+  require(GA)
+  p = ncol(X); q = ncol(Z); n = nrow(X); h = log(n)/n
+  IC = function(threshold_num){
+    return(log(-result$fitness)+1/sqrt(n)*(threshold_num+1))
+  }
+  fitness = function(coefficient){
+    alpha = coefficient[1:(threshold_num*p+p)]; beta = coefficient[(threshold_num*p+p+1):(threshold_num*p+p+q-1)]; theta = coefficient[(threshold_num*p+p+q):length(coefficient)]
+    residual = Y - X%*%alpha[1:p]
+    for (i in 1:threshold_num) {
+      residual = residual - X%*%alpha[(i*p+1):((i+1)*p)]*pnorm(((Z[,1]+as.matrix(Z[,2:q])%*%beta)-theta[i])/h)
+    }
+    return(-mean(residual^2))
+  }
+  smooth_result = list()
+  for (i in 1:(K_max-1)) {
+    threshold_num = i
+    lower = c(rep(L.alpha,(i+1)*p),rep(L.beta,q-1),rep(L.theta,i)); upper = c(rep(U.alpha,(i+1)*p),rep(U.beta,q-1),rep(U.theta,i)); result = list()
+    result = lapply(1:n.optim,function(i){
+      summary(ga(type = "real-valued", fitness = fitness, lower = lower,upper = upper, monitor = NULL))
+    })
+    result = result[[which.max(sapply(1:n.optim, function(i) result[[i]]$fitness))]]
+    estimated_theta = result$solution[(threshold_num*p+p+q):length(result$solution)]
+    estimated_alpha = matrix(result$solution[1:(threshold_num*p+p)],ncol = p,byrow = T)
+    estimated_beta = c(1,result$solution[(threshold_num*p+p+1):(threshold_num*p+p+q-1)])
+    estimated_alpha = estimated_alpha[c(1,order(estimated_theta)+1),]
+    estimated_alpha = matrix(estimated_alpha,ncol=p);rownames(estimated_alpha) = paste("group",1:(threshold_num+1))
+    estimated_theta = sort(estimated_theta)
+    value = IC(threshold_num)
+    smooth_result[[i]] = list(alpha=estimated_alpha,beta=estimated_beta,theta=estimated_theta,value=value)
+  }
+  smooth_result = smooth_result[[which.min(sapply(1:(K_max-1),function(i) smooth_result[[i]]$value))]]
+  return(smooth_result)
+}
+##Group fused lasso
+GFL = function(X,Y,Z,beta,lambda){
+  require(sparseGFL); require(GGFL)
+  p = ncol(X); q = ncol(Z); n = nrow(X)
+  #automatically select lambda
+  if (is.null(lambda)) {
+    lambda_max = max(sqrt((rowSums(apply(as.matrix((X*replicate(p,residuals(lm(Y~X-1))))[n:1,]),2,cumsum)^2))))
+    lambda = lambda_max*0.98^c(99:0)
+  }
+  #information criterion to select lambda
+  IC = function(results){
+    MSE = mean((ordered_Y - ordered_X*(t(results$beta)))^2)
+    return(log(MSE)+(length(results$changePoints)+1)/sqrt(n))
+  }
+  #area, group factor
+  group = function(location){
+    location = c(1,location,n+1)
+    area = rep(1,location[1]-1)
+    for (i in 2:length(location)) {
+      area = c(area,rep(i-1,(location[i]-location[i-1])))
+    }
+    return(area)
+  }
+  #adjacency matrix for adaptive group fused lasso
+  adj_mat = function(location){
+    threshold_num = length(location)
+    adj = matrix(nrow = threshold_num*2,ncol = 2)
+    for (i in 1:(threshold_num+1)) {
+      if (i==1) {
+        adj[i,1] = i; adj[i,2] = i+1
+      }else{
+        if (i==(threshold_num+1)) {
+          adj[2*threshold_num,1] = i; adj[2*threshold_num,2] = i-1
+        }else{
+          adj[(2*i-2):(2*i-1),1] = i; adj[2*i-2,2] = i-1; adj[2*i-1,2] = i+1
+        }
+      }
+    }
+    adj = data.frame(adj); colnames(adj) = c("area","adj")
+    return(adj)
+  }
+  #Group fused lasso
+  order_W = order(Z%*%beta); ordered_W = (Z%*%beta)[order_W]
+  ordered_Y = Y[order_W]; ordered_X = as.matrix(X[order_W,])
+  ordered_Y = matrix(ordered_Y,nrow = 1, ncol = n); ordered_X = array(t(ordered_X),c(1,p,n))
+  results = lapply(1:length(lambda), function(i) SGFL(ordered_X,ordered_Y,0,lambda[i],intercept = F))
+  ordered_Y = Y[order_W]; ordered_X = as.matrix(X[order_W,])
+  index = which.min(sapply(1:length(lambda), function(i) IC(results[[i]])))
+  location = results[[index]]$changePoints
+  while (length(location)==0) {
+    index = which.min(sapply(1:(index-1), function(i) IC(results[[i]])))
+    location = results[[index]]$changePoints
+  }
+  #adaptive group fused lasso
+  area = group(location); adj = adj_mat(location)
+  results = GGFL(ordered_Y,ordered_X,area,adj,adaptive = T, standardize = F,Lambda = 1,lambda.type = "value",MPinv = T,intercept = F)
+  w = lapply(results$weight,function(x) x^2)
+  results = GGFL::GGFL(ordered_Y,ordered_X,area,adj,adaptive = F,weight = w, standardize = F,lambda.type = "value",MPinv = T,out.all = T,intercept =F)
+  index = which.min(log(results$log$rss) + apply(results$all.cluster,1,max)/sqrt(n)); Lambda = results$log$lambda[index]
+  estimated_alpha = results$all.coef[[index]]; index = c(); results = list(); results$alpha = estimated_alpha
+  if ((length(unique(estimated_alpha[,1]))-1)==0) {
+    results$changePoints = NULL
+  }else{
+    for (i in 1:(length(unique(estimated_alpha[,1]))-1)) {
+      index[i] = max(which(estimated_alpha[,1]==(unique(estimated_alpha[,1])[i])))
+    }
+    results$changePoints = location[index]
+    results$alpha = unique.matrix(results$alpha)
+  }
+  return(list(results=results,order_W=order_W,ordered_W=ordered_W))
+}
+##Linear program
+LP = function(X,Y,Z,results,order_W,ordered_W,L.beta,U.beta,epsilon = 1e-06,n.samples = 4){
+  require(highs); q = ncol(Z); n = nrow(Z)
+  cp = results$changePoints; cp_start = c(1,cp); cp_end = c(cp-1,n)
+  theta = ordered_W[cp]; all_theta = c(-100,theta,100)
+  K = nrow(results$alpha); sq_res = c(sapply(1:K, function(i) (Y-X%*%results$alpha[i,])^2))
+  A = c(); for(i in 1:K){ A = cbind(A,diag(n))}; A = cbind(A,matrix(0,ncol = (q-1),nrow = n))
+  A_star = vector("list", 2)
+  for(i in 1:2){
+    for (j in 1:K) {
+      A_star[[i]] = cbind(A_star[[i]],-diag(n)*all_theta[i+j-1])
+    }
+    A_star[[i]] = cbind(A_star[[i]],Z[,-1])
+    A = rbind(A,A_star[[i]])
+  }
+  #objective perturbation to calculate centroid
+  estimated_beta = matrix(nrow = n.samples,ncol = q-1)
+  for (i in 1:n.samples) {
+    estimated_beta[i,] = highs_solve(
+      L = c(sq_res,replicate(q-1,epsilon*rnorm(1))),
+      A = A,
+      lhs = c(rep(1,n),-Z[,1],rep(-Inf,n)),
+      rhs = c(rep(1,n),rep(Inf,n),-Z[,1]-epsilon),
+      types = c(rep("I",length(sq_res)),rep("C",(q-1))),
+      lower = c(rep(0,length(sq_res)),rep(L.beta,q-1)),
+      upper = c(rep(1,length(sq_res)),rep(U.beta,q-1))
+    )$primal_solution[(K*n+1):(K*n+q-1)]
+  }
+  estimated_beta = c(1,colMeans(estimated_beta))
+  return(estimated_beta)
+}
+##Estimation
+MCP = function(X,Y,Z,K_max,L.alpha,L.beta,L.theta,U.alpha,U.beta,U.theta,lambda=NULL,iter=5,tol=1e-6){
+  n = nrow(X); q = ncol(Z)
+  #Initial value
+  MAE = 1; iter_num = 0
+  #Initial estimation
+  Initial = Smooth(X,Y,Z,K_max,L.alpha,L.beta,L.theta,U.alpha,U.beta,U.theta); estimated_beta = Initial$beta
+  #Group fused lasso
+  GFL_results = GFL(X,Y,Z,estimated_beta,lambda); results = GFL_results$results; order_W = GFL_results$order_W; ordered_W = GFL_results$ordered_W
+  if(length(results$changePoints)!=0){
+    while ((iter_num<iter)&(MAE>tol)) {
+      iter_num = iter_num + 1
+      MAE = ifelse(iter_num<=1,1,abs(LP(X,Y,Z,results,order_W,ordered_W,L.beta,U.beta)[-1]-estimated_beta[-1]))
+      #Linear program
+      estimated_beta = LP(X,Y,Z,results,order_W,ordered_W,L.beta,U.beta)
+      #Group fused lasso
+      GFL_results = GFL(X,Y,Z,estimated_beta,lambda); results = GFL_results$results; order_W = GFL_results$order_W; ordered_W = GFL_results$ordered_W
+      estimated_alpha = unique(results$alpha)
+      if (length(results$changePoints)==0) {
+        break
+      }
+    }
+  }
+  if (length(results$changePoints)==0) {
+    estimated_alpha = results$alpha
+    return(list(alpha=estimated_alpha,smooth=Initial))
+  }else{
+    return(list(alpha=estimated_alpha,beta=estimated_beta,theta=ordered_W[results$changePoints],smooth=Initial))
+  }
+}
+
+#Empirical
+require(readxl); setwd("/icto/user/yc47006/R/MTCPAR")
+Data = read_excel("GNP55.xlsx"); Growth = diff(log(Data$GNP))*100
+p_max = 6; q_max = 6; K_max = 4; n = length(Growth)
+result = vector("list",p_max); set.seed(12345678)
+for (i in 1:p_max) {
+  for (j in 2:q_max) {
+    n.sample = n - max(c(i,j))
+    Y = Growth[max(c(i,j)+1):n]
+    if (i>j) {
+      X = as.matrix(sapply(i:1,function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(i:(i-j+1),function(k) Growth[k:(n.sample+k-1)])
+    }
+    if (j>i) {
+      X = as.matrix(sapply(j:(j-i+1),function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(j:1,function(k) Growth[k:(n.sample+k-1)])
+    }else{
+      X = as.matrix(sapply(i:1,function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(j:1,function(k) Growth[k:(n.sample+k-1)])
+    }
+    result[[i]] = c(result[[i]],list(MCP(X,Y,Z,K_max,-2,-1,-1,2,1,1)))
+  }
+}
+AIC = matrix(nrow = p_max,ncol = (q_max-1))
+for (i in 1:p_max) {
+  for (j in 2:q_max) {
+    n.sample = n - max(c(i,j))
+    Y = Growth[max(c(i,j)+1):n]
+    if (i>j) {
+      X = as.matrix(sapply(i:1,function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(i:(i-j+1),function(k) Growth[k:(n.sample+k-1)])
+    }
+    if (j>i) {
+      X = as.matrix(sapply(j:(j-i+1),function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(j:1,function(k) Growth[k:(n.sample+k-1)])
+    }else{
+      X = as.matrix(sapply(i:1,function(k) Growth[k:(n.sample+k-1)]))
+      Z = sapply(j:1,function(k) Growth[k:(n.sample+k-1)])
+    }
+    if (is.null(result[[i]][[j-1]]$beta)) {
+      AIC[i,j-1] = n.sample*log(mean((Y - X%*%(result[[i]][[j-1]]$alpha[1,]))^2)) + 2*i
+    }else{
+      theta = result[[i]][[j-1]]$theta; beta = result[[i]][[j-1]]$beta; alpha = result[[i]][[j-1]]$alpha
+      threshold_start = c(min(Z%*%beta)-1,theta); threshold_end = c(theta,max(Z%*%beta)+1)
+      MSE = sum(sapply(1:length(threshold_start),function(k) sum((Y[(Z%*%beta>=threshold_start[k])&(Z%*%beta<threshold_end[k])]-(X%*%alpha[k,])[(Z%*%beta>=threshold_start[k])&(Z%*%beta<threshold_end[k]),])^2)))/n.sample
+      AIC[i,j-1] = n.sample*log(MSE) + 2*i*length(threshold_start) + 2*(j-1)+ 2*(length(threshold_start)-1)
+    }
+  }
+}
+
+#Rolling
+require(readxl); library(parallel)
+Data = read_excel("GNP55.xlsx"); Growth = diff(log(Data$GNP))*100
+K_max = 4; n = length(Growth)
+RNGkind("L'Ecuyer-CMRG");set.seed(789)
+result = mclapply(1:50,function(h){
+  Train = Growth[h:((length(Growth)-50-1)+h)]; n = length(Train)
+  p = 1; q = 5; n.sample = n - max(c(p,q))
+  Train_Y = Train[max(c(p,q)+1):n]
+  Train_X = as.matrix(sapply(q:(q-p+1),function(k) Train[k:(n.sample+k-1)]))
+  Train_Z = sapply(q:1,function(k) Train[k:(n.sample+k-1)])
+  return(MCP(Train_X,Train_Y,Train_Z,K_max,-1,-1,-1,1,1,1))
+}, mc.cores = 40)
+
+#Expanding
+require(readxl); library(parallel)
+Data = read_excel("GNP55.xlsx"); Growth = diff(log(Data$GNP))*100
+K_max = 4; n = length(Growth)
+RNGkind("L'Ecuyer-CMRG");set.seed(78910)
+result = mclapply(1:50,function(h){
+  Train = Growth[1:((length(Growth)-50-1)+h)]; n = length(Train)
+  p = 1; q = 5; n.sample = n - max(c(p,q))
+  Train_Y = Train[max(c(p,q)+1):n]
+  Train_X = as.matrix(sapply(q:(q-p+1),function(k) Train[k:(n.sample+k-1)]))
+  Train_Z = sapply(q:1,function(k) Train[k:(n.sample+k-1)])
+  return(MCP(Train_X,Train_Y,Train_Z,K_max,-1,-1,-1,1,1,1))
+}, mc.cores = 40)
