@@ -549,7 +549,7 @@ for (i in 1:p_max) {
 #Rolling
 require(readxl); library(parallel)
 Data = read_excel("GNP55.xlsx"); Growth = diff(log(Data$GNP))*100
-K_max = 4; n = length(Growth)
+K_max = 4; n = length(Growth); Test = Growth[(length(Growth)-50+1):length(Growth)]
 RNGkind("L'Ecuyer-CMRG");set.seed(789)
 result = mclapply(1:50,function(h){
   Train = Growth[h:((length(Growth)-50-1)+h)]; n = length(Train)
@@ -559,12 +559,73 @@ result = mclapply(1:50,function(h){
   Train_Z = sapply(q:1,function(k) Train[k:(n.sample+k-1)])
   return(MCP(Train_X,Train_Y,Train_Z,K_max,-1,-1,-1,1,1,1))
 }, mc.cores = 40)
+Roll_Train_result = result; Roll_Prediction = c()
+Roll_Prediction = c()
+for (h in 1:50) {
+  if (!is.null(Roll_Train_result[[h]]$theta)) {
+    ind = which((sum(Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-q+1)]*Roll_Train_result[[h]]$beta)<c(Roll_Train_result[[h]]$theta,1000000))==1)[1]
+    Roll_Prediction[h] = sum(Roll_Train_result[[h]]$alpha[ind,]*Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-p+1)])
+  }else{
+    Roll_Prediction[h] = sum(Roll_Train_result[[h]]$alpha*Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-p+1)])
+  }
+}
+#TAR(2,2,1)
+Roll_TAR_result = vector("list",50)
+for (h in 1:50) {
+  Train = Growth[h:((length(Growth)-50-1)+h)]
+  Roll_TAR_result[[h]] = setar(Train,mL=2,mH=2,thDelay = 1,nthresh = 1,include = "none")
+}
+Roll_TAR_prediction = c()
+for (h in 1:50) {
+  Train = Growth[h:((length(Growth)-50-1)+h)]
+  ind = as.numeric(which(Growth[((length(Growth)-50-1)+h)]<c(Roll_TAR_result[[h]]$coefficients[length(Roll_TAR_result[[h]]$coefficients)],100000))[1])
+  if (ind==1) {
+    Roll_TAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*Roll_TAR_result[[h]]$coefficients[1:2])
+  }
+  if (ind==2) {
+    Roll_TAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*Roll_TAR_result[[h]]$coefficients[3:4])
+  }
+}
+#2 thresholds: MTAR(2,1,2,1)
+Roll_MTAR_result = vector("list",50)
+for (h in 1:50) {
+  Train = Growth[h:((length(Growth)-50-1)+h)]
+  Roll_MTAR_result[[h]] = setar(Train,mL=2,mM=1,mH=2,thDelay = 1,nthresh = 2,include = "none")
+}
+Roll_MTAR_prediction = c()
+for (h in 1:50) {
+  Train = Growth[h:((length(Growth)-50-1)+h)]
+  ind = as.numeric(which(Growth[((length(Growth)-50-1)+h)]<c(Roll_MTAR_result[[h]]$coefficients[(length(Roll_MTAR_result[[h]]$coefficients)-1):length(Roll_MTAR_result[[h]]$coefficients)],100000))[1])
+  if (ind==1) {
+    Roll_MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*Roll_MTAR_result[[h]]$coefficients[1:2])
+  }
+  if (ind==2) {
+    Roll_MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h)]*Roll_MTAR_result[[h]]$coefficients[3:3])
+  }
+  if (ind==3) {
+    Roll_MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*Roll_MTAR_result[[h]]$coefficients[4:5])
+  }
+}
+#AR(6)
+Roll_AR_result = c()
+for (h in 1:50) {
+  Train = Growth[h:((length(Growth)-50-1)+h)]
+  Roll_AR_result[h] = predict(arima(Train,order = c(6,0,0),include.mean = F),n.ahead = 1)$pred[1]
+}
+#Rolling IPE
+1-(mean(abs(Roll_Prediction-Test)[1:50]))/mean(abs(Roll_AR_result-Test)[1:50])
+1-(mean(abs(Roll_TAR_prediction-Test)[1:50]))/mean(abs(Roll_AR_result-Test)[1:50])
+1-(mean(abs(Roll_MTAR_prediction-Test)[1:50]))/mean(abs(Roll_AR_result-Test)[1:50])
+
+1-(sqrt(mean((Roll_Prediction-Test)[1:50]^2)))/sqrt(mean((Roll_AR_result-Test)[1:50]^2))
+1-(sqrt(mean((Roll_TAR_prediction-Test)[1:50]^2)))/sqrt(mean((Roll_AR_result-Test)[1:50]^2))
+1-(sqrt(mean((Roll_MTAR_prediction-Test)[1:50]^2)))/sqrt(mean((Roll_AR_result-Test)[1:50]^2))
 
 #Expanding
 require(readxl); library(parallel)
 Data = read_excel("GNP55.xlsx"); Growth = diff(log(Data$GNP))*100
-K_max = 4; n = length(Growth)
-RNGkind("L'Ecuyer-CMRG");set.seed(78910)
+K_max = 4; n = length(Growth); Test = Growth[(length(Growth)-50+1):length(Growth)]
+RNGkind("L'Ecuyer-CMRG");set.seed(345678910)
 result = mclapply(1:50,function(h){
   Train = Growth[1:((length(Growth)-50-1)+h)]; n = length(Train)
   p = 1; q = 5; n.sample = n - max(c(p,q))
@@ -573,3 +634,63 @@ result = mclapply(1:50,function(h){
   Train_Z = sapply(q:1,function(k) Train[k:(n.sample+k-1)])
   return(MCP(Train_X,Train_Y,Train_Z,K_max,-1,-1,-1,1,1,1))
 }, mc.cores = 40)
+Train_result = result; Prediction = c()
+for (h in 1:50) {
+  if (!is.null(Train_result[[h]]$theta)) {
+    ind = which((sum(Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-q+1)]*Train_result[[h]]$beta)<c(Train_result[[h]]$theta,1000000))==1)[1]
+    Prediction[h] = sum(Train_result[[h]]$alpha[ind,]*Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-p+1)])
+  }else{
+    Prediction[h] = sum(Train_result[[h]]$alpha*Growth[(length(Growth)-50-1+h):(length(Growth)-50-1+h-p+1)])
+  }
+}
+#TAR(2,2,1)
+TAR_result = vector("list",50)
+for (h in 1:50) {
+  Train = Growth[1:((length(Growth)-50-1)+h)]
+  TAR_result[[h]] = setar(Train,mL=2,mH=2,thDelay = 1,nthresh = 1,include = "none")
+}
+TAR_prediction = c()
+for (h in 1:50) {
+  Train = Growth[1:((length(Growth)-50-1)+h)]
+  ind = as.numeric(which(Growth[((length(Growth)-50-1)+h)]<c(TAR_result[[h]]$coefficients[length(TAR_result[[h]]$coefficients)],100000))[1])
+  if (ind==1) {
+    TAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*TAR_result[[h]]$coefficients[1:2])
+  }
+  if (ind==2) {
+    TAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*TAR_result[[h]]$coefficients[3:4])
+  }
+}
+#2 thresholds: MTAR(2,1,2,1)
+MTAR_result = vector("list",50)
+for (h in 1:50) {
+  Train = Growth[1:((length(Growth)-50-1)+h)]
+  MTAR_result[[h]] = setar(Train,mL=2,mM=1,mH=2,thDelay = 1,nthresh = 2,include = "none")
+}
+MTAR_prediction = c()
+for (h in 1:50) {
+  Train = Growth[1:((length(Growth)-50-1)+h)]
+  ind = as.numeric(which(Growth[((length(Growth)-50-1)+h)]<c(MTAR_result[[h]]$coefficients[(length(MTAR_result[[h]]$coefficients)-1):length(MTAR_result[[h]]$coefficients)],100000))[1])
+  if (ind==1) {
+    MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*MTAR_result[[h]]$coefficients[1:2])
+  }
+  if (ind==2) {
+    MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h)]*MTAR_result[[h]]$coefficients[3:3])
+  }
+  if (ind==3) {
+    MTAR_prediction[h] = sum(Growth[((length(Growth)-50-1)+h):((length(Growth)-50-1)+h-1)]*MTAR_result[[h]]$coefficients[4:5])
+  }
+}
+#AR(6)
+AR_result = c()
+for (h in 1:50) {
+  Train = Growth[1:((length(Growth)-50-1)+h)]
+  AR_result[h] = predict(arima(Train,order = c(6,0,0),include.mean = F),n.ahead = 1)$pred[1]
+}
+#Expand IPE
+1-(mean(abs(Prediction-Test)[1:50]))/mean(abs(AR_result-Test)[1:50])
+1-(mean(abs(TAR_prediction-Test)[1:50]))/mean(abs(AR_result-Test)[1:50])
+1-(mean(abs(MTAR_prediction-Test)[1:50]))/mean(abs(AR_result-Test)[1:50])
+
+1-(sqrt(mean((Prediction-Test)[1:50]^2)))/sqrt(mean((AR_result-Test)[1:50]^2))
+1-(sqrt(mean((TAR_prediction-Test)[1:50]^2)))/sqrt(mean((AR_result-Test)[1:50]^2))
+1-(sqrt(mean((MTAR_prediction-Test)[1:50]^2)))/sqrt(mean((AR_result-Test)[1:50]^2))
