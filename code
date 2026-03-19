@@ -1,4 +1,4 @@
-library(GGFL)
+devtools::install_github("ohishim/GGFL"); library(GGFL)
 old_fun = function (y, X, group, adj, Lambda = "default", lambda.type = NULL, 
                   adaptive = TRUE, weight = NULL, alpha = NULL, standardize = TRUE, 
                   MPinv = FALSE, tol = 1e-05, maxit = 500, progress = FALSE, 
