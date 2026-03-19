@@ -1,4 +1,5 @@
-Fixed = function (y, X, group, adj, Lambda = "default", lambda.type = NULL, 
+library(GGFL)
+old_fun = function (y, X, group, adj, Lambda = "default", lambda.type = NULL, 
                   adaptive = TRUE, weight = NULL, alpha = NULL, standardize = TRUE, 
                   MPinv = FALSE, tol = 1e-05, maxit = 500, progress = FALSE, 
                   out.all = FALSE, cwu.control = NULL, intercept = TRUE) 
@@ -322,9 +323,9 @@ Fixed = function (y, X, group, adj, Lambda = "default", lambda.type = NULL,
   }
   return(out)
 }
-environment(Fixed) = asNamespace("GGFL")
-assignInNamespace("GGFL", Fixed, ns = "GGFL")
-
+unlockBinding("GGFL", as.environment("package:GGFL"))
+assign("GGFL", old_fun, envir = as.environment("package:GGFL"))
+lockBinding("GGFL", as.environment("package:GGFL"))
 ##Smoothing method(Initial estimator)
 Smooth= function(X,Y,Z,K_max,L.alpha,L.beta,L.theta,U.alpha,U.beta,U.theta,n.optim=20){
   #the first (threshold_num+1)*p elements of L and U are the lower and upper bound of alpha respectively
@@ -419,7 +420,7 @@ GFL = function(X,Y,Z,beta,lambda){
   area = group(location); adj = adj_mat(location)
   results = GGFL(ordered_Y,ordered_X,area,adj,adaptive = T, standardize = F,Lambda = 1,lambda.type = "value",MPinv = T,intercept = F)
   w = lapply(results$weight,function(x) x^2)
-  results = GGFL::GGFL(ordered_Y,ordered_X,area,adj,adaptive = F,weight = w, standardize = F,lambda.type = "value",MPinv = T,out.all = T,intercept =F)
+  results = GGFL(ordered_Y,ordered_X,area,adj,adaptive = F,weight = w, standardize = F,lambda.type = "value",MPinv = T,out.all = T,intercept =F)
   index = which.min(log(results$log$rss) + apply(results$all.cluster,1,max)/sqrt(n)); Lambda = results$log$lambda[index]
   estimated_alpha = results$all.coef[[index]]; index = c(); results = list(); results$alpha = estimated_alpha
   if ((length(unique(estimated_alpha[,1]))-1)==0) {
